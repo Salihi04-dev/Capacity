@@ -1,0 +1,51 @@
+generator client { provider = "prisma-client-js" }
+datasource db { provider = "postgresql" url = env("DATABASE_URL") }
+
+enum SettingStatus { provisional approved disabled }
+enum AdminRole { SUPER_ADMIN SUPPORT MODERATOR FINANCE }
+
+model SettingVersion {
+  id             String        @id @default(uuid()) @db.Uuid
+  key            String
+  value          Json?
+  status         SettingStatus
+  version        Int
+  effectiveAt    DateTime?     @map("effective_at") @db.Timestamptz(6)
+  source         String
+  changedBy      String?       @map("changed_by") @db.Uuid
+  changedAt      DateTime      @default(now()) @map("changed_at") @db.Timestamptz(6)
+  changeReason   String        @map("change_reason")
+  approvedBy     String?       @map("approved_by") @db.Uuid
+  approvedAt     DateTime?     @map("approved_at") @db.Timestamptz(6)
+  @@unique([key, version])
+  @@index([key, status, effectiveAt])
+  @@map("setting_versions")
+}
+
+model AuditLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  actorId     String   @map("actor_id") @db.Uuid
+  actingRole  String   @map("acting_role")
+  action      String
+  targetType  String   @map("target_type")
+  targetId    String   @map("target_id")
+  before      Json?
+  after       Json?
+  reason      String?
+  ipAddress   String?  @map("ip_address")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  @@index([actorId, createdAt])
+  @@index([targetType, targetId, createdAt])
+  @@map("audit_logs")
+}
+
+model AdminRoleAssignment {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  role        AdminRole
+  assignedBy  String    @map("assigned_by") @db.Uuid
+  assignedAt  DateTime  @default(now()) @map("assigned_at") @db.Timestamptz(6)
+  revokedAt   DateTime? @map("revoked_at") @db.Timestamptz(6)
+  @@index([userId, revokedAt])
+  @@map("admin_role_assignments")
+}
