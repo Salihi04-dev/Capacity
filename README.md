@@ -1,4 +1,4 @@
-# CAPACITY API
+## CAPACITY API
 
 Greenfield backend foundation for CAPACITY — The Invisible Infrastructure Exchange. This repository is private by requirement because the source requirements are confidential.
 
