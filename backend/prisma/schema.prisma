@@ -1,51 +1,261 @@
-generator client { provider = "prisma-client-js" }
-datasource db { provider = "postgresql" url = env("DATABASE_URL") }
+// CAPACITY foundation schema.
+//
+// Prisma 7: the connection URL is NOT declared here. The CLI reads it from prisma.config.ts and
+// the running app passes a driver adapter (see src/database/prisma.service.ts).
+//
+// Things Prisma cannot express live in raw SQL migrations (prisma/migrations): the PostGIS
+// extension, CHECK constraints, partial unique indexes, append-only triggers and database roles.
+// See docs/architecture/database-strategy.md.
 
-enum SettingStatus { provisional approved disabled }
-enum AdminRole { SUPER_ADMIN SUPPORT MODERATOR FINANCE }
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
 
+datasource db {
+  provider = "postgresql"
+}
+
+enum SettingStatus {
+  provisional
+  approved
+  disabled
+}
+
+enum AdminRole {
+  SUPER_ADMIN
+  SUPPORT
+  MODERATOR
+  FINANCE
+}
+
+enum AuditActorType {
+  user
+  system
+  webhook
+  anonymous
+}
+
+enum UserStatus {
+  active
+  restricted
+  suspended
+}
+
+enum AuthChallengePurpose {
+  PHONE_VERIFICATION
+  EMAIL_VERIFICATION
+  PASSWORD_RESET
+  STEP_UP
+  PHONE_CHANGE_OLD
+  PHONE_CHANGE_NEW
+}
+
+enum AuthChallengeChannel {
+  SMS
+  EMAIL
+}
+
+enum StepUpAction {
+  change_password
+  change_phone
+  change_email
+  change_payout_account
+  new_device_sign_in
+  sensitive_admin_action
+}
+
+enum TwoFactorMethodType {
+  TOTP
+}
+
+/// Immutable, versioned runtime settings (ADM-06). A change is a new row, never an UPDATE.
 model SettingVersion {
-  id             String        @id @default(uuid()) @db.Uuid
-  key            String
-  value          Json?
-  status         SettingStatus
-  version        Int
-  effectiveAt    DateTime?     @map("effective_at") @db.Timestamptz(6)
-  source         String
-  changedBy      String?       @map("changed_by") @db.Uuid
-  changedAt      DateTime      @default(now()) @map("changed_at") @db.Timestamptz(6)
-  changeReason   String        @map("change_reason")
-  approvedBy     String?       @map("approved_by") @db.Uuid
-  approvedAt     DateTime?     @map("approved_at") @db.Timestamptz(6)
+  id           String        @id @default(uuid()) @db.Uuid
+  key          String
+  value        Json?
+  status       SettingStatus
+  version      Int
+  effectiveAt  DateTime?     @map("effective_at") @db.Timestamptz(6)
+  source       String
+  changedBy    String?       @map("changed_by") @db.Uuid
+  changedAt    DateTime      @default(now()) @map("changed_at") @db.Timestamptz(6)
+  changeReason String        @map("change_reason")
+  approvedBy   String?       @map("approved_by") @db.Uuid
+  approvedAt   DateTime?     @map("approved_at") @db.Timestamptz(6)
+  changedByUser User?        @relation("SettingChangedBy", fields: [changedBy], references: [id], onDelete: Restrict)
+  approvedByUser User?       @relation("SettingApprovedBy", fields: [approvedBy], references: [id], onDelete: Restrict)
+
   @@unique([key, version])
   @@index([key, status, effectiveAt])
   @@map("setting_versions")
 }
 
+/// Append-only audit trail. Protected by triggers and by the restricted app role (see migrations).
+/// actorId is null for system timers, provider webhooks and unauthenticated (blocked) attempts.
 model AuditLog {
-  id          String   @id @default(uuid()) @db.Uuid
-  actorId     String   @map("actor_id") @db.Uuid
-  actingRole  String   @map("acting_role")
-  action      String
-  targetType  String   @map("target_type")
-  targetId    String   @map("target_id")
-  before      Json?
-  after       Json?
-  reason      String?
-  ipAddress   String?  @map("ip_address")
-  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  id         String         @id @default(uuid()) @db.Uuid
+  actorType  AuditActorType @default(user) @map("actor_type")
+  actorId    String?        @map("actor_id") @db.Uuid
+  actingRole String?        @map("acting_role")
+  action     String
+  targetType String         @map("target_type")
+  targetId   String         @map("target_id")
+  before     Json?
+  after      Json?
+  reason     String?
+  ipAddress  String?        @map("ip_address")
+  createdAt  DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  actor      User?          @relation("AuditActor", fields: [actorId], references: [id], onDelete: Restrict)
+
   @@index([actorId, createdAt])
   @@index([targetType, targetId, createdAt])
   @@map("audit_logs")
 }
 
+/// Admin role grants. Only `revoked_at` may change after insert (enforced by a trigger).
+/// At most one ACTIVE row per (user, role): a partial unique index in the migration.
 model AdminRoleAssignment {
-  id          String    @id @default(uuid()) @db.Uuid
-  userId      String    @map("user_id") @db.Uuid
-  role        AdminRole
-  assignedBy  String    @map("assigned_by") @db.Uuid
-  assignedAt  DateTime  @default(now()) @map("assigned_at") @db.Timestamptz(6)
-  revokedAt   DateTime? @map("revoked_at") @db.Timestamptz(6)
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  role       AdminRole
+  assignedBy String    @map("assigned_by") @db.Uuid
+  assignedAt DateTime  @default(now()) @map("assigned_at") @db.Timestamptz(6)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(6)
+  user       User      @relation("AdminRoleTarget", fields: [userId], references: [id], onDelete: Restrict)
+  assigner   User      @relation("AdminRoleAssigner", fields: [assignedBy], references: [id], onDelete: Restrict)
+
   @@index([userId, revokedAt])
   @@map("admin_role_assignments")
+}
+
+
+/// One platform account. Customer/provider participation is not a mutually exclusive user type.
+model User {
+  id                 String                  @id @default(uuid()) @db.Uuid
+  firstName          String                  @map("first_name")
+  lastName           String                  @map("last_name")
+  phone              String                  @unique
+  phoneVerifiedAt    DateTime?               @map("phone_verified_at") @db.Timestamptz(6)
+  email              String?                 @unique
+  emailVerifiedAt    DateTime?               @map("email_verified_at") @db.Timestamptz(6)
+  status             UserStatus              @default(active)
+  createdAt          DateTime                @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime                @updatedAt @map("updated_at") @db.Timestamptz(6)
+  credential         UserCredential?
+  sessions           UserSession[]
+  challenges         AuthChallenge[]
+  twoFactorMethods   UserTwoFactorMethod[]
+  consentRecords     ConsentRecord[]
+  adminRoles         AdminRoleAssignment[]   @relation("AdminRoleTarget")
+  assignedAdminRoles AdminRoleAssignment[]   @relation("AdminRoleAssigner")
+  auditLogs          AuditLog[]              @relation("AuditActor")
+  settingsChanged    SettingVersion[]        @relation("SettingChangedBy")
+  settingsApproved   SettingVersion[]        @relation("SettingApprovedBy")
+
+  @@index([status, createdAt])
+  @@map("users")
+}
+
+/// Password authentication material is isolated from the public user profile.
+model UserCredential {
+  userId           String   @id @map("user_id") @db.Uuid
+  passwordHash     String   @map("password_hash")
+  passwordChangedAt DateTime @default(now()) @map("password_changed_at") @db.Timestamptz(6)
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user             User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@map("user_credentials")
+}
+
+/// One persistent, revocable session per authenticated device.
+model UserSession {
+  id              String         @id @default(uuid()) @db.Uuid
+  userId          String         @map("user_id") @db.Uuid
+  deviceName      String?        @map("device_name")
+  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastUsedAt      DateTime       @default(now()) @map("last_used_at") @db.Timestamptz(6)
+  expiresAt       DateTime       @map("expires_at") @db.Timestamptz(6)
+  revokedAt       DateTime?      @map("revoked_at") @db.Timestamptz(6)
+  revocationReason String?       @map("revocation_reason")
+  user            User           @relation(fields: [userId], references: [id], onDelete: Restrict)
+  refreshTokens   RefreshToken[]
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+  @@map("user_sessions")
+}
+
+/// Hashed refresh-token history. Rotation consumes one row and creates its successor.
+model RefreshToken {
+  id                String        @id @default(uuid()) @db.Uuid
+  sessionId         String        @map("session_id") @db.Uuid
+  tokenHash         String        @unique @map("token_hash")
+  createdAt         DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  expiresAt         DateTime      @map("expires_at") @db.Timestamptz(6)
+  consumedAt        DateTime?     @map("consumed_at") @db.Timestamptz(6)
+  revokedAt         DateTime?     @map("revoked_at") @db.Timestamptz(6)
+  replacedByTokenId String?       @unique @map("replaced_by_token_id") @db.Uuid
+  session           UserSession   @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  replacedBy        RefreshToken? @relation("RefreshTokenRotation", fields: [replacedByTokenId], references: [id], onDelete: Restrict)
+  replaces          RefreshToken? @relation("RefreshTokenRotation")
+
+  @@index([sessionId, expiresAt])
+  @@map("refresh_tokens")
+}
+
+/// Short-lived one-time challenges for verification, recovery and step-up operations.
+model AuthChallenge {
+  id             String                @id @default(uuid()) @db.Uuid
+  userId         String?               @map("user_id") @db.Uuid
+  purpose        AuthChallengePurpose
+  channel        AuthChallengeChannel?
+  destination    String?
+  codeHash       String                @map("code_hash")
+  action         StepUpAction?
+  contextId      String?               @map("context_id") @db.Uuid
+  attemptCount   Int                   @default(0) @map("attempt_count")
+  maxAttempts    Int                   @default(5) @map("max_attempts")
+  createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  expiresAt      DateTime              @map("expires_at") @db.Timestamptz(6)
+  consumedAt     DateTime?             @map("consumed_at") @db.Timestamptz(6)
+  invalidatedAt  DateTime?             @map("invalidated_at") @db.Timestamptz(6)
+  user           User?                 @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, purpose, createdAt])
+  @@index([expiresAt])
+  @@map("auth_challenges")
+}
+
+/// Encrypted staff TOTP seed and replay-prevention state.
+model UserTwoFactorMethod {
+  id                   String              @id @default(uuid()) @db.Uuid
+  userId               String              @map("user_id") @db.Uuid
+  method               TwoFactorMethodType @default(TOTP)
+  secretCiphertext     Bytes               @map("secret_ciphertext")
+  encryptionKeyVersion String              @map("encryption_key_version")
+  confirmedAt          DateTime?           @map("confirmed_at") @db.Timestamptz(6)
+  lastAcceptedTimeStep BigInt?             @map("last_accepted_time_step")
+  createdAt            DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+  disabledAt           DateTime?           @map("disabled_at") @db.Timestamptz(6)
+  user                 User                @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, disabledAt])
+  @@map("user_two_factor_methods")
+}
+
+/// Immutable evidence of the terms and privacy notice versions accepted at registration.
+model ConsentRecord {
+  id            String   @id @default(uuid()) @db.Uuid
+  userId        String   @map("user_id") @db.Uuid
+  termsVersion  String   @map("terms_version")
+  privacyVersion String  @map("privacy_version")
+  acceptedAt    DateTime @default(now()) @map("accepted_at") @db.Timestamptz(6)
+  user          User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, acceptedAt])
+  @@map("consent_records")
 }
