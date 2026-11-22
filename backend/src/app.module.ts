@@ -1,4 +1,5 @@
-import { Module } from '@nestjs/common';
+import { Module, RequestMethod } from '@nestjs/common';
+import { makeRequestId } from './common/request-id';
 import { ConfigModule } from '@nestjs/config';
 import { LoggerModule } from 'nestjs-pino';
 import { envSchema } from './config/env.validation';
@@ -21,9 +22,52 @@ import { AdminModule } from './modules/admin/admin.module';
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true, validationSchema: envSchema, validationOptions: { abortEarly: false, allowUnknown: true } }),
-    LoggerModule.forRoot({ pinoHttp: { level: process.env.LOG_LEVEL ?? 'info', transport: process.env.NODE_ENV === 'development' ? { target: 'pino-pretty', options: { singleLine: true } } : undefined, redact: ['req.headers.authorization', 'req.headers.cookie', '*.password', '*.token', '*.secret'] } }),
-    DatabaseModule, HealthModule, AuthModule, BusinessesModule, VerificationModule, ListingsModule, LogisticsModule, StorageModule, DiscoveryModule, BookingsModule, PaymentsModule, LedgerPayoutsModule, DisputesModule, ReviewsReportsModule, NotificationsModule, AdminModule,
+    ConfigModule.forRoot({
+      isGlobal: true,
+      validationSchema: envSchema,
+      validationOptions: { abortEarly: false, allowUnknown: true },
+    }),
+    LoggerModule.forRoot({
+      // Express 5 / Nest 11 wildcard syntax. The library default '*' triggers a legacy-route warning.
+      forRoutes: [{ path: '{*splat}', method: RequestMethod.ALL }],
+      pinoHttp: {
+        genReqId: (req, res) => {
+          const id = makeRequestId(req.headers['x-request-id']);
+          res.setHeader('X-Request-Id', id);
+          return id;
+        },
+        level: process.env.LOG_LEVEL ?? 'info',
+        transport:
+          process.env.NODE_ENV === 'development'
+            ? { target: 'pino-pretty', options: { singleLine: true } }
+            : undefined,
+        redact: [
+          'req.headers.authorization',
+          'req.headers.cookie',
+          'req.headers["x-step-up-token"]',
+          'res.headers["set-cookie"]',
+          '*.password',
+          '*.token',
+          '*.secret',
+        ],
+      },
+    }),
+    DatabaseModule,
+    HealthModule,
+    AuthModule,
+    BusinessesModule,
+    VerificationModule,
+    ListingsModule,
+    LogisticsModule,
+    StorageModule,
+    DiscoveryModule,
+    BookingsModule,
+    PaymentsModule,
+    LedgerPayoutsModule,
+    DisputesModule,
+    ReviewsReportsModule,
+    NotificationsModule,
+    AdminModule,
   ],
 })
 export class AppModule {}
