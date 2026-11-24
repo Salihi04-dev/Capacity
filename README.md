@@ -42,7 +42,7 @@ npm run prisma:migrate:dev
 - PostgreSQL is the source of truth. Redis, if introduced later, is not authoritative for bookings or financial records.
 - Runtime business settings belong in the database, versioned and audited. Environment variables are infrastructure-only.
 - Provider integrations are ports. No provider is selected. Fake adapters must never run in production.
-- Money is integer minor units (kobo), never floating point.
+- Money is integer minor units (kobo), never floating point. 
 - Storage remains disabled for the pilot and is enforced server-side.
 - Generated OpenAPI describes implementation; it is not an approved product contract until human review is recorded.
 - Do not push, merge or publish this private repository without owner direction.
